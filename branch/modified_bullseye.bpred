@@ -1,0 +1,96 @@
+#include "ooo_cpu.h"
+#include <unordered_map>
+#include <unordered_set>
+
+#define GLOBAL_HISTORY_LENGTH 14
+#define GLOBAL_HISTORY_MASK ((1 << GLOBAL_HISTORY_LENGTH) - 1)
+
+#define GS_HISTORY_TABLE_SIZE 16384
+
+#define HARD_THRESHOLD 5
+
+int branch_history_vector[NUM_CPUS];
+int gs_history_table[NUM_CPUS][GS_HISTORY_TABLE_SIZE];
+int my_last_prediction[NUM_CPUS];
+
+std::unordered_map<uint64_t,int> mispred_count[NUM_CPUS];
+std::unordered_set<uint64_t> hard_branches[NUM_CPUS];
+
+void O3_CPU::initialize_branch_predictor()
+{
+    cout << "CPU " << cpu << " Modified Bullseye Branch Predictor" << endl;
+
+    branch_history_vector[cpu] = 0;
+    my_last_prediction[cpu] = 0;
+
+    mispred_count[cpu].clear();
+    hard_branches[cpu].clear();
+
+    for(int i=0; i<GS_HISTORY_TABLE_SIZE; i++)
+        gs_history_table[cpu][i] = 2;
+}
+
+unsigned int gs_table_hash(uint64_t ip, int bh_vector)
+{
+    unsigned int hash =
+        ip ^
+        (ip >> GLOBAL_HISTORY_LENGTH) ^
+        (ip >> (GLOBAL_HISTORY_LENGTH * 2)) ^
+        bh_vector;
+
+    hash %= GS_HISTORY_TABLE_SIZE;
+
+    return hash;
+}
+
+uint8_t O3_CPU::predict_branch(uint64_t ip)
+{
+    int prediction;
+
+    int gs_hash = gs_table_hash(ip, branch_history_vector[cpu]);
+
+    if(hard_branches[cpu].count(ip))
+    {
+        // Bullseye: hard branches get special treatment
+        prediction = (gs_history_table[cpu][gs_hash] >= 1) ? 1 : 0;
+    }
+    else
+    {
+        prediction = (gs_history_table[cpu][gs_hash] >= 2) ? 1 : 0;
+    }
+
+    my_last_prediction[cpu] = prediction;
+
+    return prediction;
+}
+
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken)
+{
+    int gs_hash = gs_table_hash(ip, branch_history_vector[cpu]);
+
+    // Track difficult branches
+    if(my_last_prediction[cpu] != taken)
+    {
+        mispred_count[cpu][ip]++;
+
+        if(mispred_count[cpu][ip] >= HARD_THRESHOLD)
+            hard_branches[cpu].insert(ip);
+    }
+
+    // Update predictor counters
+    if(taken)
+    {
+        if(gs_history_table[cpu][gs_hash] < 3)
+            gs_history_table[cpu][gs_hash]++;
+    }
+    else
+    {
+        if(gs_history_table[cpu][gs_hash] > 0)
+            gs_history_table[cpu][gs_hash]--;
+    }
+
+    // Update global history
+    branch_history_vector[cpu] <<= 1;
+    branch_history_vector[cpu] &= GLOBAL_HISTORY_MASK;
+    branch_history_vector[cpu] |= taken;
+}
